@@ -31,7 +31,8 @@ const hashGenerator = (n: number): string => {
   return hashStr;
 };
 
-const setDataAsync = (path: string, data: Buffer): Promise<void> => {
+const setDataAsync = async (path: string, data: Buffer): Promise<void> => {
+  await ensurePathExists(path);
   return new Promise((resolve, reject) => {
     zkClient.setData(path, data, (error) => {
       if (error) {
@@ -83,20 +84,63 @@ const createNodeAsync = (path: string, buffer: Buffer): Promise<string> => {
   });
 };
 
+// const removeNodeAsync = (path: string): Promise<void> => {
+//   return new Promise((resolve, reject) => {
+//     zkClient.remove(path, (error) => {
+//       if (error) {
+//         const appError = new ApiError(`Failed to remove node at ${path}`, 500, [
+//           error,
+//         ]);
+//         Logger.error(appError.message, { error, path });
+//         return reject(appError);
+//       }
+//       resolve();
+//     });
+//   });
+// };
+
 const removeNodeAsync = (path: string): Promise<void> => {
   return new Promise((resolve, reject) => {
     zkClient.remove(path, (error) => {
       if (error) {
+        const zkError = error as zookeeper.Exception;
+        if (
+          zkError.getCode &&
+          zkError.getCode() === zookeeper.Exception.NO_NODE
+        ) {
+          Logger.warn(`ZNode ${path} does not exist. Skipping deletion.`);
+          return resolve();
+        }
+
         const appError = new ApiError(`Failed to remove node at ${path}`, 500, [
           error,
         ]);
         Logger.error(appError.message, { error, path });
         return reject(appError);
       }
+
+      Logger.info(`ZNode ${path} removed.`);
       resolve();
     });
   });
 };
+
+const removeNodeWithRetry = async (
+  path: string,
+  retries = 3
+): Promise<void> => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await removeNodeAsync(path);
+      return;
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      Logger.warn(`Retrying removal of ${path}. Attempt ${i + 1}`);
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+};
+
 const ensurePathExists = (path: string): Promise<void> => {
   return new Promise((resolve, reject) => {
     zkClient.exists(path, (error, stat) => {
@@ -190,6 +234,7 @@ const releaseLock = async (lockNodePath: string): Promise<void> => {
 const setTokenRangeWithLock = async (lastUsedToken: number): Promise<void> => {
   const lockPath = await acquireLock();
   try {
+    await ensurePathExists("/token");
     const dataToSet = Buffer.from(String(lastUsedToken), "utf8");
     await setDataAsync("/token", dataToSet);
     Logger.info(`Updated last used token to: ${lastUsedToken}`);
@@ -248,7 +293,7 @@ const checkIfTokenExists = async (): Promise<void> => {
 };
 
 const removeToken = async (): Promise<void> => {
-  await removeNodeAsync("/token");
+  await removeNodeWithRetry("/token");
   console.log("ZNode /token removed.");
 };
 
